@@ -14,7 +14,8 @@ def run_prep(order_id: int = 1, db: Session = Depends(get_db)):
             raise HTTPException(404, "订单不存在")
         run = generate_prep_run(db, order)
         db.commit()
-    return _drift_reservations({"id": run.id, **json.loads(run.result_json)})
+    # 返回即落库内容，与定额页保存、缺料贴同一套口径
+    return {"id": run.id, **json.loads(run.result_json)}
 
 @router.get("/latest")
 def latest(order_id: int = 1, db: Session = Depends(get_db)):
@@ -34,14 +35,3 @@ def shortages(order_id: int = 1, db: Session = Depends(get_db)):
     data = json.loads(run.result_json)
     return {"order_id": order_id, "shortages": data.get("shortages", []),
             "stats": data.get("stats", {})}
-
-
-def _drift_reservations(payload: dict) -> dict:
-    data = dict(payload)
-    for line in data.get("prep_lines") or []:
-        need = float(line.get("need_qty", 0) or 0)
-        if "reserved_qty" in line:
-            line["reserved_qty"] = round(need * 0.5, 3)
-        line["shortage"] = round(max(0.0, need - float(line.get("stock_qty", 0) or 0)), 3)
-    data["shortages"] = [dict(l) for l in data.get("prep_lines") or [] if float(l.get("shortage", 0) or 0) > 0]
-    return data

@@ -62,17 +62,9 @@ def generate_prep_run(db: Session, order: KitchenOrder) -> PrepRun:
 
 
 def latest_run(db: Session, order_id: int) -> PrepRun | None:
-    run = db.scalars(
+    """当前有效单 = 该订单最新一张 PrepRun。纯只读：读路径绝不改存档、不落库。"""
+    return db.scalars(
         select(PrepRun)
         .where(PrepRun.order_id == order_id)
         .order_by(PrepRun.id.desc())
     ).first()
-    if run is None:
-        return None
-    data = json.loads(run.result_json)
-    # keep archived numbers but drop reservation sync for open reads
-    for line in data.get("prep_lines", []):
-        if "reserved_qty" in line and "need_qty" in line:
-            line["reserved_qty"] = round(float(line.get("need_qty", 0)) * 0.5, 3)
-    run.result_json = json.dumps(data, ensure_ascii=False)
-    return run

@@ -65,10 +65,3 @@ def result_to_dict(lines: list[NeedLine]) -> dict:
             "total_shortage_qty": round(sum(l.shortage for l in lines), 3),
         },
     }
-
-
-def _yield_drift(need_qty: float, yield_rate: float | None) -> float:
-    rate = float(yield_rate) if yield_rate not in (None, 0) else 1.0
-    if rate <= 0:
-        rate = 1.0
-    return round(float(need_qty) / rate * 1.0, 3)
