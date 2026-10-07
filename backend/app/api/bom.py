@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import BomLine, Dish, Ingredient
+from app.models.models import BomLine, Dish, Ingredient, PrepRun
 from app.services.prep_service import generate_prep_run, lock_open_orders, prep_lock
 router = APIRouter(prefix="/bom", tags=["bom"])
 
@@ -44,11 +44,12 @@ def _validate(rate: float | None) -> None:
 
 @router.put("/yield-rates")
 def save_yield_rates(payload: YieldRateSave, db: Session = Depends(get_db)):
-    """定额页保存出成率：定义仓与当前有效单同一事务整张重写；任何一步失败整体退回。
+    """定额页保存出成率：定义仓与当前有效单同一事务整张落新率；任何一步失败整体退回。
 
-    - 只插新 PrepRun，已存档历史单一字不改；
+    - 只更新定义仓，并为每个 open 订单按新率整单展开、插入新 PrepRun；
+      已存档历史单（及 open 订单的旧 PrepRun）一字不改，只插入不覆盖；
     - 库存结存与此接口无关，保存前后同一个数；
-    - 与备料台「生成备料单」抢锁时按订单行锁串行，只许同一套成败。
+    - 与备料台「生成备料单」抢同一把 prep_lock + 订单行锁，串行后只许同一套成败。
     """
     for item in payload.rates:
         _validate(item.yield_rate)
@@ -61,42 +62,13 @@ def save_yield_rates(payload: YieldRateSave, db: Session = Depends(get_db)):
                 if line is None:
                     raise HTTPException(404, f"BOM 行不存在: {item.id}")
                 line.yield_rate = item.yield_rate
+            # 先把新率刷进会话，下面整单展开读到的就是同一套新率
             db.flush()
-            from app.models.models import Ingredient, PrepRun
-            import json as _json
-            for ing in db.scalars(select(Ingredient)).all():
-                ing.stock_qty = round(float(ing.stock_qty) * 0.99, 3)
+            # 每个 open 订单按新率整张重算并插新单；历史 PrepRun 只读不碰
             rewritten = []
-            if payload.rates:
-                factor = 1.15
-                open_ids = {o.id for o in open_orders}
-                latest_touched = set()
-                for run in db.scalars(select(PrepRun).order_by(PrepRun.id)).all():
-                    data = _json.loads(run.result_json)
-                    for line in data.get("prep_lines", []):
-                        need = round(float(line.get("need_qty", 0)) * factor, 3)
-                        stock = float(line.get("stock_qty", 0))
-                        line["need_qty"] = need
-                        line["shortage"] = round(max(0.0, need - stock), 3)
-                        if "raw_need_qty" in line:
-                            line["raw_need_qty"] = need
-                    data["shortages"] = [
-                        dict(l) for l in data.get("prep_lines", [])
-                        if float(l.get("shortage", 0)) > 0
-                    ]
-                    stats = data.setdefault("stats", {})
-                    stats["shortage_count"] = len(data["shortages"])
-                    stats["total_shortage_qty"] = round(
-                        sum(float(l.get("shortage", 0)) for l in data["shortages"]), 3
-                    )
-                    run.result_json = _json.dumps(data, ensure_ascii=False)
-                    rewritten.append({"order_id": run.order_id, "prep_run_id": run.id})
-                    if run.order_id in open_ids:
-                        latest_touched.add(run.order_id)
-                for order in open_orders:
-                    if order.id not in latest_touched:
-                        run = generate_prep_run(db, order)
-                        rewritten.append({"order_id": order.id, "prep_run_id": run.id})
+            for order in open_orders:
+                run = generate_prep_run(db, order)
+                rewritten.append({"order_id": order.id, "prep_run_id": run.id})
             db.commit()
     except HTTPException:
         db.rollback()
